@@ -1,85 +1,78 @@
 # banking-service
 
-This project uses Quarkus, the Supersonic Subatomic Java Framework.
+Microsserviço de **cadastro de agências**. Valida a agência no banking-validation antes de salvar e consome do Kafka
+os pedidos de remoção de agências inativadas, fechando a saga correspondente.
 
-If you want to learn more about Quarkus, please visit its website: <https://quarkus.io/>.
+Faz parte do projeto [kafka-rabbitmq-banking](https://github.com/gabriel-sartoretto/kafka-rabbitmq-banking), junto com
+[banking-validation](https://github.com/gabriel-sartoretto/mensageria-banking-validation) e
+[banking-audit](https://github.com/gabriel-sartoretto/mensageria-banking-audit).
 
-## Running the application in dev mode
+**Stack:** Java 21 · Quarkus 3.15 · Hibernate Reactive Panache · PostgreSQL · REST Client · Kafka + Avro/Schema Registry · Micrometer/Prometheus
 
-You can run your application in dev mode that enables live coding using:
+## O que ele faz
 
-```shell script
-./mvnw compile quarkus:dev
+### Cadastro (`POST /agencia`)
+1. Consulta `GET /situacao-cadastral/{cnpj}` no banking-validation.
+2. Recusa se a agência não existir lá ou não estiver `ATIVO` (`AgenciaNaoAtivaOuNaoEncontradaException`).
+3. Recusa se o CNPJ já estiver cadastrado aqui (`AgenciaJaExistenteException`).
+4. Caso contrário, persiste a agência.
+
+### Remoção via Kafka (`RemoverAgenciaService`)
+Consome o tópico `remover-agencia-avro` (grupo `banking-service-consumer-group`), com mensagens Avro `br.com.alura.Agencia`
+enviadas pelo banking-validation quando uma agência fica INATIVO. Para cada mensagem:
+
+| Situação | Ação | Fechamento da saga no validation |
+|---|---|---|
+| Agência encontrada | Remove do banco | `PUT /saga/sucesso` |
+| Agência não existe mais (ex.: reenvio do resync) | Nada | `PUT /saga/ignorada` |
+| Nome da agência contém `ERRO` | **Falha simulada**, para testar o fluxo de erro | `PUT /saga/erro` |
+| Falha real na remoção | — | `PUT /saga/erro` |
+
+Mensagens antigas, sem `sagaId`, são processadas mas não fecham saga.
+
+## Endpoints (porta 8080)
+
+| Método | Caminho | Descrição |
+|---|---|---|
+| `POST` | `/agencia` | Cadastra uma agência (validada no banking-validation) |
+| `GET` | `/metrics` | Métricas Prometheus |
+
+```bash
+curl -X POST localhost:8080/agencia -H "Content-Type: application/json" \
+  -d '{"nome":"Agencia BSB","razaoSocial":"Asa Norte AGENCIA BSB","cnpj":"15130254000100","situacaoCadastral":"ATIVO"}'
 ```
 
-> **_NOTE:_**  Quarkus now ships with a Dev UI, which is available in dev mode only at <http://localhost:8080/q/dev/>.
+## Rodando localmente
 
-## Packaging and running the application
+Pré-requisito: a infraestrutura (Kafka, Schema Registry etc.) e a API do
+[banking-validation](https://github.com/gabriel-sartoretto/mensageria-banking-validation) rodando (porta 8181).
 
-The application can be packaged using:
-
-```shell script
-./mvnw package
+```bash
+docker compose up -d postgres-db-alura-banking-service   # PostgreSQL na porta 5433, banco "agencia"
+./mvnw quarkus:dev
 ```
 
-It produces the `quarkus-run.jar` file in the `target/quarkus-app/` directory.
-Be aware that it’s not an _über-jar_ as the dependencies are copied into the `target/quarkus-app/lib/` directory.
+O `docker-compose.yml` também tem o serviço `banking-service` (imagem `joao0212/banking-service:v1`, do curso), caso
+queira rodar a API pelo Docker em vez do `quarkus:dev`.
 
-The application is now runnable using `java -jar target/quarkus-app/quarkus-run.jar`.
+Variáveis de ambiente (com os valores padrão):
 
-If you want to build an _über-jar_, execute the following command:
+| Variável | Padrão |
+|---|---|
+| `QUARKUS_DATASOURCE_HOST` / `_PORT` | `localhost` / `5433` |
+| `QUARKUS_DATASOURCE_USERNAME` / `_PASSWORD` | `joao` / `joao` |
+| `QUARKUS_CLIENT_HTTP` / `_PORT` (banking-validation) | `localhost` / `8181` |
+| `QUARKUS_KAFKA_HOST` / `_PORT` | `localhost` / `9092` |
 
-```shell script
+## Schema Avro
+
+`src/main/avro/Agencia.avsc` gera a classe `br.com.alura.Agencia`. O mesmo arquivo existe no banking-validation:
+qualquer mudança precisa ser feita **nos dois** e manter compatibilidade (novos campos com `default`, como `sagaId`).
+
+## Build
+
+```bash
+./mvnw package                                  # target/quarkus-app/quarkus-run.jar
 ./mvnw package -Dquarkus.package.jar.type=uber-jar
+./mvnw package -Dnative                         # executável nativo (requer GraalVM)
 ```
-
-The application, packaged as an _über-jar_, is now runnable using `java -jar target/*-runner.jar`.
-
-## Creating a native executable
-
-You can create a native executable using:
-
-```shell script
-./mvnw package -Dnative
-```
-
-Or, if you don't have GraalVM installed, you can run the native executable build in a container using:
-
-```shell script
-./mvnw package -Dnative -Dquarkus.native.container-build=true
-```
-
-You can then execute your native executable with: `./target/banking-service-1.0.0-SNAPSHOT-runner`
-
-If you want to learn more about building native executables, please consult <https://quarkus.io/guides/maven-tooling>.
-
-## Related Guides
-
-- REST ([guide](https://quarkus.io/guides/rest)): A Jakarta REST implementation utilizing build time processing and Vert.x. This extension is not compatible with the quarkus-resteasy extension, or any of the extensions that depend on it.
-- REST Client ([guide](https://quarkus.io/guides/rest-client)): Call REST services
-- OpenTelemetry ([guide](https://quarkus.io/guides/opentelemetry)): Use OpenTelemetry to trace services
-- Hibernate ORM with Panache ([guide](https://quarkus.io/guides/hibernate-orm-panache)): Simplify your persistence code for Hibernate ORM via the active record or the repository pattern
-- JDBC Driver - PostgreSQL ([guide](https://quarkus.io/guides/datasource)): Connect to the PostgreSQL database via JDBC
-
-## Provided Code
-
-### Hibernate ORM
-
-Create your first JPA entity
-
-[Related guide section...](https://quarkus.io/guides/hibernate-orm)
-
-[Related Hibernate with Panache section...](https://quarkus.io/guides/hibernate-orm-panache)
-
-
-### REST Client
-
-Invoke different services through REST with JSON
-
-[Related guide section...](https://quarkus.io/guides/rest-client)
-
-### REST
-
-Easily start your REST Web Services
-
-[Related guide section...](https://quarkus.io/guides/getting-started-reactive#reactive-jax-rs-resources)
